@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"time"
 
 	"github.com/libp2p/go-libp2p"
@@ -11,14 +12,37 @@ import (
 	"github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/peer"
+	discovery "github.com/libp2p/go-libp2p-discovery"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	"go.uber.org/fx"
 
 	// libp2pquic "github.com/libp2p/go-libp2p-quic-transport"
+	//routing "github.com/libp2p/go-libp2p-core/routing"
+	disc "github.com/libp2p/go-libp2p-discovery"
 	routing "github.com/libp2p/go-libp2p-routing"
 	secio "github.com/libp2p/go-libp2p-secio"
 	libp2ptls "github.com/libp2p/go-libp2p-tls"
 	"github.com/multiformats/go-multiaddr"
 )
+
+func TopicDiscovery() interface{} {
+	return func(mctx context.Context, lc fx.Lifecycle, host host.Host, cr routing.IpfsRouting) (service discovery.Discovery, err error) {
+		baseDisc := disc.NewRoutingDiscovery(cr)
+		minBackoff, maxBackoff := time.Second*60, time.Hour
+		rng := rand.New(rand.NewSource(rand.Int63()))
+		d, err := disc.NewBackoffDiscovery(
+			baseDisc,
+			disc.NewExponentialBackoff(minBackoff, maxBackoff, disc.FullJitter, time.Second, 5.0, 0, rng),
+		)
+
+		if err != nil {
+			return nil, err
+		}
+
+		return d, nil
+	}
+}
 
 func main() {
 	// The context governs the lifetime of the libp2p node.
@@ -41,13 +65,15 @@ func main() {
 
 	var idht *dht.IpfsDHT
 
+	psk := []byte{0x55, 0x48, 0xb7, 0xf2, 0xeb, 0xd9, 0x56, 0x80, 0x81, 0xab, 0x23, 0xa6, 0x1f, 0x15, 0xff, 0x68, 0x24, 0xe8, 0x35, 0xe5, 0xca, 0xc4, 0xc5, 0x1c, 0xaf, 0x27, 0xd8, 0xbc, 0x5c, 0x3e, 0x6c, 0x4d}
+
 	h2, err := libp2p.New(ctx,
 		// Use the keypair we generated
 		libp2p.Identity(priv),
 		// Multiple listen addresses
 		libp2p.ListenAddrStrings(
-			"/ip4/0.0.0.0/tcp/9000",      // regular tcp connections
-			"/ip4/0.0.0.0/udp/9000/quic", // a UDP endpoint for the QUIC transport
+			"/ip4/0.0.0.0/tcp/4001",      // regular tcp connections
+			"/ip4/0.0.0.0/udp/4001/quic", // a UDP endpoint for the QUIC transport
 		),
 		// support TLS connections
 		libp2p.Security(libp2ptls.ID, libp2ptls.New),
@@ -57,6 +83,7 @@ func main() {
 		// libp2p.Transport(libp2pquic.NewTransport),
 		// support any other default transports (TCP)
 		libp2p.DefaultTransports,
+		libp2p.DefaultMuxers,
 		// Let's prevent our peer from having too many
 		// connections by attaching a connection manager.
 		libp2p.ConnectionManager(connmgr.NewConnManager(
@@ -75,6 +102,7 @@ func main() {
 		// it finds it is behind NAT. Use libp2p.Relay(options...) to
 		// enable active relays and more.
 		libp2p.EnableAutoRelay(),
+		libp2p.PrivateNetwork(psk),
 	)
 	if err != nil {
 		panic(err)
@@ -90,6 +118,7 @@ func main() {
 		libp2p.Security(secio.ID, secio.New),
 		// libp2p.Transport(libp2pquic.NewTransport),
 		libp2p.DefaultTransports,
+		libp2p.DefaultMuxers,
 	)
 
 	fmt.Printf("Hello World, my second hosts ID is %s\n", h2.ID())
@@ -116,9 +145,46 @@ func main() {
 		pi, _ := peer.AddrInfoFromP2pAddr(addr)
 		// We ignore errors as some bootstrap peers may be down
 		// and that is fine.
-		h2.Connect(ctx, *pi)
+		err := h2.Connect(ctx, *pi)
+		if err != nil {
+			fmt.Println(err)
+		} else {
+			fmt.Printf("success connect %s\n", addr.String())
+		}
 	}
 
 	fmt.Printf("peers: %v\n", h2.Peerstore().Peers())
-	select {}
+
+	var pubsubOptions []pubsub.Option
+	pubsubOptions = append(
+		pubsubOptions,
+		pubsub.WithMessageSigning(true),
+		pubsub.WithStrictSignatureVerification(false),
+	)
+	ps, err := pubsub.NewGossipSub(ctx, h2, pubsubOptions...)
+	if err != nil {
+		panic(err)
+	}
+
+	sub, err := ps.Subscribe("fuck")
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	for {
+		fmt.Println("sub Next: ")
+		got, err := sub.Next(ctx)
+		if err != nil {
+			fmt.Println(err)
+		}
+
+		fmt.Println(got.Data)
+
+		select {
+		case <-ctx.Done():
+			break
+		default:
+		}
+	}
+
 }
