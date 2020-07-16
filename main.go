@@ -3,46 +3,24 @@ package main
 import (
 	"context"
 	"fmt"
-	"math/rand"
-	"time"
 
-	"github.com/libp2p/go-libp2p"
-	autonat "github.com/libp2p/go-libp2p-autonat-svc"
-	connmgr "github.com/libp2p/go-libp2p-connmgr"
+	csms "github.com/libp2p/go-conn-security-multistream"
 	"github.com/libp2p/go-libp2p-core/crypto"
-	"github.com/libp2p/go-libp2p-core/host"
+	"github.com/libp2p/go-libp2p-core/metrics"
 	"github.com/libp2p/go-libp2p-core/peer"
-	discovery "github.com/libp2p/go-libp2p-discovery"
-	dht "github.com/libp2p/go-libp2p-kad-dht"
+	peerstore "github.com/libp2p/go-libp2p-peerstore"
+	pstoremem "github.com/libp2p/go-libp2p-peerstore/pstoremem"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
-	"go.uber.org/fx"
-
-	// libp2pquic "github.com/libp2p/go-libp2p-quic-transport"
-	//routing "github.com/libp2p/go-libp2p-core/routing"
-	disc "github.com/libp2p/go-libp2p-discovery"
-	routing "github.com/libp2p/go-libp2p-routing"
 	secio "github.com/libp2p/go-libp2p-secio"
-	libp2ptls "github.com/libp2p/go-libp2p-tls"
+	swarm "github.com/libp2p/go-libp2p-swarm"
+	tptu "github.com/libp2p/go-libp2p-transport-upgrader"
+	yamux "github.com/libp2p/go-libp2p-yamux"
+	bhost "github.com/libp2p/go-libp2p/p2p/host/basic"
+	msmux "github.com/libp2p/go-stream-muxer-multistream"
+	"github.com/libp2p/go-tcp-transport"
+
 	"github.com/multiformats/go-multiaddr"
 )
-
-func TopicDiscovery() interface{} {
-	return func(mctx context.Context, lc fx.Lifecycle, host host.Host, cr routing.IpfsRouting) (service discovery.Discovery, err error) {
-		baseDisc := disc.NewRoutingDiscovery(cr)
-		minBackoff, maxBackoff := time.Second*60, time.Hour
-		rng := rand.New(rand.NewSource(rand.Int63()))
-		d, err := disc.NewBackoffDiscovery(
-			baseDisc,
-			disc.NewExponentialBackoff(minBackoff, maxBackoff, disc.FullJitter, time.Second, 5.0, 0, rng),
-		)
-
-		if err != nil {
-			return nil, err
-		}
-
-		return d, nil
-	}
-}
 
 func main() {
 	// The context governs the lifetime of the libp2p node.
@@ -63,65 +41,72 @@ func main() {
 		panic(err)
 	}
 
-	var idht *dht.IpfsDHT
+	//psk := []byte{0x55, 0x48, 0xb7, 0xf2, 0xeb, 0xd9, 0x56, 0x80, 0x81, 0xab, 0x23, 0xa6, 0x1f, 0x15, 0xff, 0x68, 0x24, 0xe8, 0x35, 0xe5, 0xca, 0xc4, 0xc5, 0x1c, 0xaf, 0x27, 0xd8, 0xbc, 0x5c, 0x3e, 0x6c, 0x4d}
 
-	psk := []byte{0x55, 0x48, 0xb7, 0xf2, 0xeb, 0xd9, 0x56, 0x80, 0x81, 0xab, 0x23, 0xa6, 0x1f, 0x15, 0xff, 0x68, 0x24, 0xe8, 0x35, 0xe5, 0xca, 0xc4, 0xc5, 0x1c, 0xaf, 0x27, 0xd8, 0xbc, 0x5c, 0x3e, 0x6c, 0x4d}
+	// h, err := libp2p.New(ctx,
+	// 	// Use the keypair we generated
+	// 	libp2p.Identity(priv),
+	// 	// Multiple listen addresses
+	// 	libp2p.ListenAddrStrings(
+	// 		"/ip4/0.0.0.0/tcp/9392", // regular tcp connections
+	// 	),
+	// 	libp2p.PrivateNetwork(psk),
+	// )
+	// if err != nil {
+	// 	panic(err)
+	// }
 
-	h2, err := libp2p.New(ctx,
-		// Use the keypair we generated
-		libp2p.Identity(priv),
-		// Multiple listen addresses
-		libp2p.ListenAddrStrings(
-			"/ip4/0.0.0.0/tcp/4001",      // regular tcp connections
-			"/ip4/0.0.0.0/udp/4001/quic", // a UDP endpoint for the QUIC transport
-		),
-		// support TLS connections
-		libp2p.Security(libp2ptls.ID, libp2ptls.New),
-		// support secio connections
-		libp2p.Security(secio.ID, secio.New),
-		// support QUIC - experimental
-		// libp2p.Transport(libp2pquic.NewTransport),
-		// support any other default transports (TCP)
-		libp2p.DefaultTransports,
-		libp2p.DefaultMuxers,
-		// Let's prevent our peer from having too many
-		// connections by attaching a connection manager.
-		libp2p.ConnectionManager(connmgr.NewConnManager(
-			100,         // Lowwater
-			400,         // HighWater,
-			time.Minute, // GracePeriod
-		)),
-		// Attempt to open ports using uPNP for NATed hosts.
-		libp2p.NATPortMap(),
-		// Let this host use the DHT to find other hosts
-		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
-			idht, err = dht.New(ctx, h)
-			return idht, err
-		}),
-		// Let this host use relays and advertise itself on relays if
-		// it finds it is behind NAT. Use libp2p.Relay(options...) to
-		// enable active relays and more.
-		libp2p.EnableAutoRelay(),
-		libp2p.PrivateNetwork(psk),
-	)
+	pid, err := peer.IDFromPublicKey(priv.GetPublic())
 	if err != nil {
 		panic(err)
 	}
 
-	// If you want to help other peers to figure out if they are behind
-	// NATs, you can launch the server-side of AutoNAT too (AutoRelay
-	// already runs the client)
-	_, err = autonat.NewAutoNATService(ctx, h2,
-		// Support same non default security and transport options as
-		// original host.
-		libp2p.Security(libp2ptls.ID, libp2ptls.New),
-		libp2p.Security(secio.ID, secio.New),
-		// libp2p.Transport(libp2pquic.NewTransport),
-		libp2p.DefaultTransports,
-		libp2p.DefaultMuxers,
-	)
+	pstore := pstoremem.NewPeerstore()
 
-	fmt.Printf("Hello World, my second hosts ID is %s\n", h2.ID())
+	if err := pstore.AddPrivKey(pid, priv); err != nil {
+		panic(err)
+	}
+	if err := pstore.AddPubKey(pid, priv.GetPublic()); err != nil {
+		panic(err)
+	}
+
+	s := swarm.NewSwarm(ctx, pid, pstore, metrics.NewBandwidthCounter())
+
+	id := s.LocalPeer()
+	pk := s.Peerstore().PrivKey(id)
+	secMuxer := new(csms.SSMuxer)
+	secMuxer.AddTransport(secio.ID, &secio.Transport{
+		LocalID:    id,
+		PrivateKey: pk,
+	})
+
+	stMuxer := msmux.NewBlankTransport()
+	stMuxer.AddTransport("/yamux/1.0.0", yamux.DefaultTransport)
+
+	upgrader := &tptu.Upgrader{
+		Secure:  secMuxer,
+		Muxer:   stMuxer,
+		Filters: s.Filters,
+	}
+
+	//upgrader.ConnGater = cfg.connectionGater
+	tcpTransport := tcp.NewTCPTransport(upgrader)
+	//tcpTransport.DisableReuseport = cfg.disableReuseport
+
+	if err := s.AddTransport(tcpTransport); err != nil {
+		panic(err)
+	}
+
+	var ZeroLocalTCPAddress, _ = multiaddr.NewMultiaddr("/ip4/0.0.0.0/tcp/9000")
+	if err := s.Listen(ZeroLocalTCPAddress); err != nil {
+		panic(err)
+	}
+
+	s.Peerstore().AddAddrs(pid, s.ListenAddresses(), peerstore.PermanentAddrTTL)
+
+	bh := bhost.New(s)
+
+	fmt.Printf("Hello World, my second hosts ID is %s\n", bh.ID())
 
 	// The last step to get fully up and running would be to connect to
 	// bootstrap peers (or any other peers). We leave this commented as
@@ -130,7 +115,8 @@ func main() {
 
 	var DefaultBootstrapPeers []multiaddr.Multiaddr
 	for _, s := range []string{
-		"/ip4/39.104.89.79/tcp/4001/p2p/bafzm3jqbec7ulhfmm7s7ydt2mf32nbsjy4237mvzj5skzbkxrfxz7axghsyum",
+		//"/dns4/public.baasze.com/tcp/4001/p2p/bafzm3jqbebirvt7q5o2o35kgxr2vskstfvxhzztukp7xfhgd3vjkfexaznujy",
+		//"/ip4/127.0.0.1/tcp/9000/p2p/bafzm3jqbedqdpe5giegij4oiiczwupkk4cqlh3ufjvx3tzwchbhshilm3p7ci",
 	} {
 		ma, err := multiaddr.NewMultiaddr(s)
 		if err != nil {
@@ -145,7 +131,7 @@ func main() {
 		pi, _ := peer.AddrInfoFromP2pAddr(addr)
 		// We ignore errors as some bootstrap peers may be down
 		// and that is fine.
-		err := h2.Connect(ctx, *pi)
+		err := bh.Connect(ctx, *pi)
 		if err != nil {
 			fmt.Println(err)
 		} else {
@@ -153,7 +139,7 @@ func main() {
 		}
 	}
 
-	fmt.Printf("peers: %v\n", h2.Peerstore().Peers())
+	fmt.Printf("peers: %v\n", bh.Peerstore().Peers())
 
 	var pubsubOptions []pubsub.Option
 	pubsubOptions = append(
@@ -161,24 +147,20 @@ func main() {
 		pubsub.WithMessageSigning(true),
 		pubsub.WithStrictSignatureVerification(false),
 	)
-	ps, err := pubsub.NewGossipSub(ctx, h2, pubsubOptions...)
+	ps, err := pubsub.NewGossipSub(ctx, bh, pubsubOptions...)
 	if err != nil {
 		panic(err)
 	}
 
 	sub, err := ps.Subscribe("fuck")
-	if err != nil {
-		fmt.Println(err)
-	}
 
 	for {
-		fmt.Println("sub Next: ")
 		got, err := sub.Next(ctx)
 		if err != nil {
 			fmt.Println(err)
+		} else {
+			fmt.Println(got.GetData())
 		}
-
-		fmt.Println(got.Data)
 
 		select {
 		case <-ctx.Done():
